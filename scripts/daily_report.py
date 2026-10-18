@@ -803,6 +803,16 @@ p{{margin:8px 0;font-size:14px;line-height:1.9}}
 
 
 # ============ 推送 ============
+def _clip(text, n=260):
+    """按句子边界截断，避免卡片摘要断在"当日性质是"中间。"""
+    t = (text or "").strip()
+    if len(t) <= n:
+        return t
+    cut = t[:n]
+    idx = max(cut.rfind("。"), cut.rfind("；"), cut.rfind("！"), cut.rfind("？"))
+    return cut[:idx + 1] if idx >= n // 2 else cut.rstrip() + "…"
+
+
 def push(seg, snap, div, report_url):
     url = os.environ.get("WEBHOOK_URL", "").strip()
     if not url:
@@ -814,7 +824,7 @@ def push(seg, snap, div, report_url):
             f"黄金ETF {gold.get('price', '—')}（{gold.get('chg', 0):+.2f}%）")
     if div.get("gap") is not None:
         head += f"\n制造业-服务业差 {div['gap']:+.2f} 个百分点"
-    excerpt = (seg.get("nasdaq") or "")[:220]
+    excerpt = _clip(seg.get("nasdaq"), 260)
     if "open.feishu.cn" in url:
         elements = [{"tag": "div", "text": {"tag": "lark_md", "content": head}},
                     {"tag": "div", "text": {"tag": "lark_md", "content": excerpt}}]
