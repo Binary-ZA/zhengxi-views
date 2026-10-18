@@ -387,6 +387,26 @@ def _sentences(para):
     return [s.strip() for s in re.split(r"(?<=[。！？；])", para) if s.strip()]
 
 
+# 季报的层级标题：引用时要去掉，否则会把"产业分析：A、AI Capex产业链："带进正文
+LEAD_TITLE = re.compile(
+    r"^(?:产业分析|产业层面|TMT产业层面|TMT产业|分析原因|信息产业层面|新兴产业层面|"
+    r"全球宏观层面|全球宏观|A股资本市场流动性层面|A股资本市场流动性|宏观经济层面|"
+    r"信息产业整体|产业内部分化)\s*[:：]\s*")
+LEAD_NUM = re.compile(r"^[（(]?[0-9A-Da-d一二三四五]{1,2}[）)、.．]\s*")
+
+
+def _strip_lead(s):
+    """剥掉句首可能叠加的多层标号（"产业分析：A、…"）。"""
+    s = s.strip()
+    for _ in range(3):
+        before = s
+        s = LEAD_TITLE.sub("", s)
+        s = LEAD_NUM.sub("", s)
+        if s == before:
+            break
+    return s
+
+
 def corpus_sentences():
     """把全部语料切成句子，带出处。"""
     out = []
@@ -401,8 +421,10 @@ def corpus_sentences():
         body = text.split("---", 1)[-1]
         body = re.sub(r"^(郑希|摘自.*|查看更多投资观点)\s*$", "", body, flags=re.M)
         for para in re.split(r"\n\s*\n", body):
-            for s in _sentences(para.strip()):
-                s = re.sub(r"^[（(]?[0-9A-Da-d][）)、.]\s*", "", s.strip())
+            # 季报里的换行是排版，不是语义分隔，先压平
+            flat = re.sub(r"\s*\n+\s*", "", para.strip())
+            for s in _sentences(flat):
+                s = _strip_lead(s)
                 if 25 <= len(s) <= 175:
                     out.append({"text": s, "date": date, "title": title, "kind": kind,
                                 "year": int(date[:4]) if date[:4].isdigit() else 0})
@@ -490,6 +512,10 @@ def compose(mode, materials):
         "1) 只能使用材料中出现的数字和事实，禁止编造点位、涨跌幅、公司业绩、目标价。材料没给的数字一律不写。\n"
         "2) 引用郑希原话只能来自材料给出的片段，不得改写、不得扩写、不得把推演说成他说的。\n"
         "3) 每段都要落到具体环节或具体标的，不写'市场情绪谨慎'这类空话。\n"
+        "4) 禁止做单位或汇率换算（例如把'2亿美元'折成人民币），材料里没有的数字不要自己算出来。\n"
+        "5) 页面已单独标注 A 股 ETF 与美股的时差，正文不要再去解释这件事。\n"
+        "6) 判断价格与均线的关系只比数值大小：价格低于某条均线就写'跌破'，高于才写'站上'，"
+        "不要用'逼近''接近'这类模糊说法。\n"
         "输出严格使用下面五个标记分段，不要写其它标题、不要写前言和后记：\n"
         "【纳指解读】120-200字。结合均线、RSI、MACD、回撤、波动率中至少两个具体数字，"
         "说明当前处在什么位置，以及当日涨跌的性质（趋势延续还是震荡）。\n"
