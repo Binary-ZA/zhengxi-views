@@ -14,7 +14,8 @@ on:
 
 permissions:
   contents: read
-  models: read
+  pages: write
+  id-token: write
 
 jobs:
   report:
@@ -32,14 +33,27 @@ jobs:
 
       - name: 生成并推送日报
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           MODE: ${{ github.event.inputs.mode || (github.event.schedule == '0 12 * * *' && 'post' || 'pre') }}
         run: python scripts/daily_report.py --mode "$MODE"
+
+      # 下面两步依赖仓库已开启 Pages（Settings → Pages → Source 选 GitHub Actions）。
+      # 加 continue-on-error：没开 Pages 时自动跳过，不影响报告生成和归档。
+      - name: 准备网页
+        uses: actions/upload-pages-artifact@v3
+        continue-on-error: true
+        with:
+          path: outputs
+
+      - name: 发布网页
+        id: deployment
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
 
       - name: 归档报告
         uses: actions/upload-artifact@v4
         with:
           name: daily-report
-          path: outputs/report.md
+          path: outputs/
           retention-days: 90
