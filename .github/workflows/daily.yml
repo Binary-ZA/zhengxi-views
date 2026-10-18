@@ -1,0 +1,45 @@
+name: 郑希视角日报
+
+on:
+  schedule:
+    - cron: "0 0 * * *"    # 北京时间 08:00 盘前
+    - cron: "0 12 * * *"   # 北京时间 20:00 盘后
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "pre=盘前 / post=盘后"
+        default: "pre"
+        type: choice
+        options: [pre, post]
+
+permissions:
+  contents: read
+  models: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 生成并推送日报
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          MODE: ${{ github.event.inputs.mode || (github.event.schedule == '0 12 * * *' && 'post' || 'pre') }}
+        run: python scripts/daily_report.py --mode "$MODE"
+
+      - name: 归档报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-report
+          path: outputs/report.md
+          retention-days: 90
