@@ -493,7 +493,7 @@ def fallback_quotes(n=2):
 
 
 # ============ LLM ============
-def compose(mode, materials):
+def compose(mode, materials, feedback=None):
     token = os.environ.get("LLM_API_KEY", "")
     # 兼容两种填法：填到 /v1 或填完整的 /v1/chat/completions 都能用
     url = (os.environ.get("LLM_BASE_URL") or "https://api.xiaomimimo.com/v1").rstrip("/")
@@ -538,6 +538,9 @@ def compose(mode, materials):
         f"【当日热点（标题/摘要/来源）】\n{materials['hot']}\n\n"
         f"【郑希原话（可引用，带出处）】\n{materials['quotes']}"
     )
+    if feedback:
+        user_prompt += ("\n\n【上一稿被校验拦下的问题，请修正后重写全部五段】\n"
+                        + "\n".join(f"- {x}" for x in feedback))
     payload = {
         "model": model,
         "messages": [{"role": "system", "content": sys_prompt},
@@ -557,7 +560,7 @@ def compose(mode, materials):
     if u:
         print(f"  模型 {model}：输入 {u.get('prompt_tokens')} + 输出 {u.get('completion_tokens')} "
               f"= {u.get('total_tokens')} tokens")
-    return d["choices"][0]["message"]["content"]
+    return d["choices"][0]["message"]["content"], u
 
 
 def split_sections(text):
@@ -569,6 +572,65 @@ def split_sections(text):
     if not any(out.values()):
         out["view"] = text.strip()
     return out
+
+
+# ============ 输出校验 ============
+SECTION_LABEL = {"nasdaq": "纳指解读", "gold": "黄金解读", "div": "分化判读",
+                 "view": "推演", "watch": "观察点"}
+# 均线语境下的模糊说法：价格在下方却写"逼近"，会直接误导
+VAGUE_WORDS = ["逼近", "接近"]
+DECLARE_WORDS = ["按其方法", "按他的方法", "按郑希的方法", "推演", "非他本人", "不是他本人"]
+
+
+def _nums(text):
+    """抽数字并做归一：去千分位逗号、同时登记 1~2 位小数截断版。
+
+    材料里写 26,211.74、模型写 26211.74，或材料 101.7827、模型 101.78，
+    都是同一个数，不该被误判成"自造"。
+    """
+    text = re.sub(r"(?<=\d),(?=\d{3})", "", text)
+    out = set()
+    for m in re.findall(r"\d+(?:\.\d+)?", text):
+        out.add(m)
+        if "." in m:
+            a, b = m.split(".", 1)
+            out.add(f"{a}.{b[:1]}")
+            out.add(f"{a}.{b[:2]}")
+    return out
+
+
+def validate(seg, materials):
+    """返回 (hard, soft)：hard 触发重试，soft 只记录。
+
+    这是脚本层的客观检查，不占用 prompt 篇幅——约束写在提示词里靠模型自觉，
+    校验写在代码里才靠得住。
+    """
+    hard, soft = [], []
+
+    # 1) 五段完整性
+    for key, label in SECTION_LABEL.items():
+        if not (seg.get(key) or "").strip():
+            hard.append(f"缺少【{label}】段落或内容为空")
+
+    body = " ".join((seg.get(k) or "") for k in ["nasdaq", "gold", "div", "view"])
+
+    # 2) 均线关系禁用模糊词
+    for w in VAGUE_WORDS:
+        if w in body:
+            hard.append(f"出现「{w}」。价格与均线的关系必须直接写「跌破」或「站上」，不能用模糊说法")
+
+    # 3) 推演必须自证身份
+    view = seg.get("view") or ""
+    if view and not any(w in view for w in DECLARE_WORDS):
+        hard.append("【推演】没有声明这是按其方法的推演，会被误读成他本人的观点")
+
+    # 4) 疑似自造数字（软警告：可能是模型自行推算，不拦截发送）
+    allowed = _nums(json.dumps(materials, ensure_ascii=False) + datetime.date.today().isoformat())
+    extra = sorted(n for n in _nums(body) if len(n.replace(".", "")) >= 3 and n not in allowed)
+    if extra:
+        soft.append(f"以下数字材料里没有，可能是模型自己算的：{'、'.join(extra[:8])}")
+
+    return hard, soft
 
 
 # ============ HTML ============
@@ -603,7 +665,7 @@ def _spark(values, w=680, h=88):
             f'stroke-linejoin="round" stroke-linecap="round"/></svg>')
 
 
-def render_html(snap, tech, div, bot, news, quotes, kw, seg, mode):
+def render_html(snap, tech, div, bot, news, quotes, kw, seg, mode, problems=None):
     kind = "盘前" if mode == "pre" else "盘后"
     today = datetime.date.today()
     date_cn = f"{today.year}年{today.month}月{today.day}日"
@@ -719,6 +781,13 @@ def render_html(snap, tech, div, bot, news, quotes, kw, seg, mode):
 
     kw_html = "、".join(kw) if kw else "无"
 
+    prob_html = ""
+    if problems:
+        items = "".join(f"<li>{x}</li>" for x in problems)
+        prob_html = (f'<div class="prob"><b>本期待核 {len(problems)} 项</b>'
+                     f'<div class="muted">脚本自动校验发现，不影响阅读但请留意</div>'
+                     f'<ul>{items}</ul></div>')
+
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -775,6 +844,9 @@ h2{{font-size:17px;margin:32px 0 14px;padding-left:11px;border-left:4px solid va
 .watch li{{font-size:13.5px;line-height:1.9}}
 p{{margin:8px 0;font-size:14px;line-height:1.9}}
 .muted{{color:var(--muted);font-size:12px}}
+.prob{{background:#fff8e6;border:1px solid #f0e0b8;border-radius:10px;padding:12px 16px;margin:20px 0;font-size:12.5px}}
+.prob ul{{margin:6px 0 0;padding-left:18px;color:#6b5a2e}}
+.prob li{{line-height:1.7}}
 .foot{{margin-top:28px;padding-top:14px;border-top:1px solid var(--line);font-size:11.5px;color:var(--muted);line-height:1.8}}
 @media(max-width:520px){{.grid{{grid-template-columns:repeat(2,1fr)}}.dcards{{grid-template-columns:1fr}}}}
 </style></head><body><div class="wrap">
@@ -823,6 +895,7 @@ p{{margin:8px 0;font-size:14px;line-height:1.9}}
 <div class="muted">接下来几天用数据验证，不成立就说明推演要修</div>
 <ul>{watch_html}</ul></div>
 
+{prob_html}
 <div class="foot">仅供研究学习参考，不构成投资建议。文中"郑希原话"均来自其公开季报/访谈原文并标注出处；<br>
 "按方法推演"为按其公开方法的模拟分析，非郑希本人观点。行情数据来自腾讯/新浪公开接口。</div>
 </div></body></html>"""
@@ -966,23 +1039,78 @@ def main():
         "quotes": "\n".join(f"- {q['title']}（{q['date']}）：“{q['text']}”" for q in quotes) or "（无）",
     }
 
+    problems, usage = [], {}
     if args.seg:
         with open(args.seg, encoding="utf-8") as f:
             seg = json.load(f)
+        hard, soft = validate(seg, materials)
+        problems = hard + soft
+        if problems:
+            print("人工注入段落存在待核项：")
+            for x in problems:
+                print("  !", x)
     elif args.no_llm:
         seg = {"nasdaq": "", "gold": "", "div": "", "watch": "",
                "view": "（--no-llm 调试模式，未调用模型）"}
     else:
-        seg = split_sections(compose(args.mode, materials))
+        text, usage = compose(args.mode, materials)
+        seg = split_sections(text)
+        hard, soft = validate(seg, materials)
+        if hard:
+            print("校验未通过，重试一次：")
+            for x in hard:
+                print("  ✗", x)
+            text, usage2 = compose(args.mode, materials, feedback=hard)
+            seg2 = split_sections(text)
+            hard2, soft2 = validate(seg2, materials)
+            # 重试用尽：哪版硬问题少用哪版，实在都不行就用第二版并标注
+            if len(hard2) <= len(hard):
+                seg, hard, soft, usage = seg2, hard2, soft2, usage2
+            print("重试后剩余问题：", hard2 or "无")
+        problems = hard + soft
+        if problems:
+            print("本期待核项：")
+            for x in problems:
+                print("  !", x)
+
+    # 存档：按日期留一份 HTML，供日后回看与批量质检；history.jsonl 一行一期
+    archive_dir = os.path.join(OUT_DIR, "archive")
+    os.makedirs(archive_dir, exist_ok=True)
+    today_str = datetime.date.today().isoformat()
+    archive_name = f"{today_str}-{args.mode}.html"
+
+    html = render_html(snap, tech, div, bot, news, quotes, kw, seg, args.mode, problems)
 
     os.makedirs(OUT_DIR, exist_ok=True)
     with open(os.path.join(OUT_DIR, "report.json"), "w", encoding="utf-8") as f:
         json.dump({"snap": snap, "tech": tech, "div": div, "bot": bot, "news": news,
-                   "quotes": quotes, "kw": kw, "seg": seg},
+                   "quotes": quotes, "kw": kw, "seg": seg, "problems": problems},
                   f, ensure_ascii=False, indent=2, default=str)
     with open(os.path.join(OUT_DIR, "index.html"), "w", encoding="utf-8") as f:
-        f.write(render_html(snap, tech, div, bot, news, quotes, kw, seg, args.mode))
-    print("报告已写入 outputs/index.html 与 outputs/report.json")
+        f.write(html)
+    with open(os.path.join(archive_dir, archive_name), "w", encoding="utf-8") as f:
+        f.write(html)
+
+    rec = {
+        "date": today_str, "mode": args.mode,
+        "ixic": (snap.get("ixic") or {}).get("price"),
+        "ixic_chg": (snap.get("ixic") or {}).get("chg"),
+        "sox_chg": (snap.get("sox") or {}).get("chg"),
+        "rsi14": tech.get("rsi14"),
+        "pct250": tech.get("pct250"),
+        "manu_avg": div.get("manu_avg"), "serv_avg": div.get("serv_avg"),
+        "div_gap": div.get("gap"),
+        "bottleneck": {b["seg"]: b.get("chg") for b in bot},
+        "kw": kw,
+        "quotes": [{"date": q["date"], "title": q["title"], "text": q["text"]} for q in quotes],
+        "seg": seg, "problems": problems,
+        "usage": usage, "archive": archive_name,
+    }
+    with open(os.path.join(OUT_DIR, "history.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+
+    print(f"报告已写入 outputs/index.html、archive/{archive_name}，"
+          f"history.jsonl 追加一行；待核项 {len(problems)} 个")
 
     repo_env = os.environ.get("GITHUB_REPOSITORY", "")
     report_url = os.environ.get("REPORT_URL", "").strip()
