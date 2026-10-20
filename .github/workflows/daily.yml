@@ -3,9 +3,9 @@ name: 郑希视角日报
 on:
   schedule:
     # 避开整点与整半点：GitHub 的 schedule 在 xx:00/xx:30 排队最严重（实测延迟 2~7 小时）
-    # 07:23 选 UTC 23 点（全球清闲时段）；21:23 卡在美股开盘前发出，不与盘中价打架
+    # 07:23 选 UTC 23 点（全球清闲时段）；19:23 落在 A股已收(15:00)、美股未开(21:30)的窗口里
     - cron: "23 23 * * *"    # 北京时间 07:23 盘前
-    - cron: "23 13 * * *"    # 北京时间 21:23 盘后
+    - cron: "23 11 * * *"    # 北京时间 19:23 盘后
   workflow_dispatch:
     inputs:
       mode:
@@ -37,14 +37,14 @@ jobs:
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-          MODE: ${{ github.event.inputs.mode || (github.event.schedule == '23 13 * * *' && 'post' || 'pre') }}
+          MODE: ${{ github.event.inputs.mode || (github.event.schedule == '23 11 * * *' && 'post' || 'pre') }}
         run: python scripts/daily_report.py --mode "$MODE"
 
       # 把当天这期存档提交回仓库：outputs/archive/日期-模式.html 与 outputs/history.jsonl
       # 目的是攒样本，日后能一次性回看多期、统计问题类型，而不是每次只看最新一期。
       - name: 存档提交
         env:
-          MODE: ${{ github.event.inputs.mode || (github.event.schedule == '23 13 * * *' && 'post' || 'pre') }}
+          MODE: ${{ github.event.inputs.mode || (github.event.schedule == '23 11 * * *' && 'post' || 'pre') }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
