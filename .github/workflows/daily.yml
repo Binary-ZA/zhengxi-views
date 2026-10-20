@@ -2,8 +2,10 @@ name: 郑希视角日报
 
 on:
   schedule:
-    - cron: "0 0 * * *"    # 北京时间 08:00 盘前
-    - cron: "0 12 * * *"   # 北京时间 20:00 盘后
+    # 避开整点与整半点：GitHub 的 schedule 在 xx:00/xx:30 排队最严重（实测延迟 2~7 小时）
+    # 07:23 选 UTC 23 点（全球清闲时段）；21:23 卡在美股开盘前发出，不与盘中价打架
+    - cron: "23 23 * * *"    # 北京时间 07:23 盘前
+    - cron: "23 13 * * *"    # 北京时间 21:23 盘后
   workflow_dispatch:
     inputs:
       mode:
@@ -13,7 +15,7 @@ on:
         options: [pre, post]
 
 permissions:
-  contents: read
+  contents: write     # 存档要提交回仓库，供日后批量质检
   pages: write
   id-token: write
 
@@ -35,8 +37,25 @@ jobs:
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-          MODE: ${{ github.event.inputs.mode || (github.event.schedule == '0 12 * * *' && 'post' || 'pre') }}
+          MODE: ${{ github.event.inputs.mode || (github.event.schedule == '23 13 * * *' && 'post' || 'pre') }}
         run: python scripts/daily_report.py --mode "$MODE"
+
+      # 把当天这期存档提交回仓库：outputs/archive/日期-模式.html 与 outputs/history.jsonl
+      # 目的是攒样本，日后能一次性回看多期、统计问题类型，而不是每次只看最新一期。
+      - name: 存档提交
+        env:
+          MODE: ${{ github.event.inputs.mode || (github.event.schedule == '23 13 * * *' && 'post' || 'pre') }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add outputs/archive outputs/history.jsonl
+          if git diff --staged --quiet; then
+            echo "无新增存档，跳过提交"
+          else
+            git commit -m "archive: $(date -u +%F) $MODE"
+            # 并发运行（如手动连点两次）时可能推不上去，失败不影响本次报告与部署
+            git push || echo "推送失败（可能并发），本次报告不受影响"
+          fi
 
       # 下面两步依赖仓库已开启 Pages（Settings → Pages → Source 选 GitHub Actions）。
       # 加 continue-on-error：没开 Pages 时自动跳过，不影响报告生成和归档。
