@@ -791,7 +791,7 @@ def render_html(snap, tech, div, bot, news, quotes, kw, seg, mode, problems=None
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>每日全球科技行情分析报告 · {date_cn}</title>
+<title>每日全球科技行情分析报告 · {kind} · {date_cn}</title>
 <style>
 :root{{--ink:#1a1a1a;--muted:#70757d;--brand:#1f5fbf;--line:#e6e8eb;--bg:#fafbfc;--card:#fff}}
 *{{box-sizing:border-box}}
@@ -824,6 +824,7 @@ h2{{font-size:17px;margin:32px 0 14px;padding-left:11px;border-left:4px solid va
 .dc{{font-variant-numeric:tabular-nums}}
 .gap{{font-size:13px;margin:10px 0 0}}
 .pill{{display:inline-block;font-size:10.5px;padding:1px 7px;border-radius:99px;background:#eef1f5;color:#4b5563}}
+.kind{{display:inline-block;font-size:13px;padding:2px 11px;border-radius:99px;background:#1f5fbf;color:#fff;vertical-align:3px;letter-spacing:1px}}
 .tbl{{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0}}
 .tbl th{{text-align:left;color:var(--muted);font-weight:500;font-size:12px;border-bottom:1px solid var(--line);padding:7px 4px}}
 .tbl td{{padding:8px 4px;border-bottom:1px solid #f1f3f5}}
@@ -850,7 +851,7 @@ p{{margin:8px 0;font-size:14px;line-height:1.9}}
 .foot{{margin-top:28px;padding-top:14px;border-top:1px solid var(--line);font-size:11.5px;color:var(--muted);line-height:1.8}}
 @media(max-width:520px){{.grid{{grid-template-columns:repeat(2,1fr)}}.dcards{{grid-template-columns:1fr}}}}
 </style></head><body><div class="wrap">
-<h1>每日全球科技行情分析报告</h1>
+<h1>每日全球科技行情分析报告 <span class="kind">{kind}</span></h1>
 <div class="meta">日期：{date_cn}（{weekday}）｜{kind}版｜美股为最近一个已收盘交易日，A股为沪深最近交易日收盘<br>
 本篇溯源关键词：{kw_html}</div>
 
@@ -912,11 +913,12 @@ def _clip(text, n=260):
     return cut[:idx + 1] if idx >= n // 2 else cut.rstrip() + "…"
 
 
-def push(seg, snap, div, report_url):
+def push(seg, snap, div, report_url, mode="pre"):
     url = os.environ.get("WEBHOOK_URL", "").strip()
     if not url:
         print("未配置 WEBHOOK_URL，跳过推送（报告已存 outputs/）")
         return
+    kind = "盘前" if mode == "pre" else "盘后"
     ix = snap.get("ixic") or {}
     gold = snap.get("etf_gold") or {}
     head = (f"纳指 {ix.get('price', '—')}（{ix.get('chg', 0):+.2f}%）｜"
@@ -930,15 +932,16 @@ def push(seg, snap, div, report_url):
         if report_url:
             elements.append({"tag": "action", "actions": [{
                 "tag": "button", "type": "primary",
-                "text": {"tag": "plain_text", "content": "查看完整报告"},
+                "text": {"tag": "plain_text", "content": f"查看{kind}完整报告"},
                 "url": report_url}]})
         payload = {"msg_type": "interactive", "card": {
-            "header": {"title": {"tag": "plain_text", "content": "每日全球科技行情 · 郑希视角"},
+            "header": {"title": {"tag": "plain_text",
+                                 "content": f"每日全球科技行情 · {kind} · 郑希视角"},
                        "template": "blue"},
             "elements": elements}}
     elif "oapi.dingtalk.com" in url:
         payload = {"msgtype": "text",
-                   "text": {"content": f"【每日全球科技行情】\n{head}\n{excerpt}\n{report_url}"}}
+                   "text": {"content": f"【每日全球科技行情 · {kind}】\n{head}\n{excerpt}\n{report_url}"}}
     else:
         print("WEBHOOK_URL 无法识别（仅支持飞书/钉钉），跳过推送")
         return
@@ -1112,13 +1115,16 @@ def main():
     print(f"报告已写入 outputs/index.html、archive/{archive_name}，"
           f"history.jsonl 追加一行；待核项 {len(problems)} 个")
 
+    # 卡片链接指向「当期专属页面」而不是首页：首页每期都被覆盖，
+    # 早报晚报点开会是同一份内容。改用 archive/日期-模式.html，一期一个地址、永久有效。
     repo_env = os.environ.get("GITHUB_REPOSITORY", "")
-    report_url = os.environ.get("REPORT_URL", "").strip()
-    if not report_url and "/" in repo_env:
+    base_url = os.environ.get("REPORT_URL", "").strip()
+    if not base_url and "/" in repo_env:
         owner, repo = repo_env.split("/", 1)
-        report_url = f"https://{owner.lower()}.github.io/{repo}/"
+        base_url = f"https://{owner.lower()}.github.io/{repo}/"
+    report_url = (base_url.rstrip("/") + "/archive/" + archive_name) if base_url else ""
     if not args.no_llm:
-        push(seg, snap, div, report_url)
+        push(seg, snap, div, report_url, args.mode)
 
 
 if __name__ == "__main__":
