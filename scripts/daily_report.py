@@ -958,6 +958,26 @@ def main():
     ap.add_argument("--seg", help="从 JSON 读入五段文字并跳过 LLM（无 key 时预览用）")
     args = ap.parse_args()
 
+    # 幂等保护：触发源有 Cloudflare Workers 和 GitHub 原生 cron 两套，可能重复触发。
+    # 同一天同模式只生成一次；history.jsonl 随存档提交回仓库，checkout 后可直接读到。
+    # 调试模式（--no-llm / --seg）不受此限制。
+    if not args.no_llm and not args.seg:
+        hist_path = os.path.join(OUT_DIR, "history.jsonl")
+        if os.path.exists(hist_path):
+            today = datetime.date.today().isoformat()
+            with open(hist_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("date") == today and rec.get("mode") == args.mode:
+                        print(f"今日 {args.mode} 版已生成过（{today}），跳过本次重复触发")
+                        return
+
     print("== 1/5 行情 ==")
     snap = market_snapshot()
     tech = tech_indicators(snap.get("ixic_hist") or [])
