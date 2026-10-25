@@ -516,16 +516,20 @@ def compose(mode, materials, feedback=None):
         "5) 页面已单独标注 A 股 ETF 与美股的时差，正文不要再去解释这件事。\n"
         "6) 判断价格与均线的关系只比数值大小：价格低于某条均线就写'跌破'，高于才写'站上'，"
         "不要用'逼近''接近'这类模糊说法。\n"
+        "7) 引用原话必须保留完整语义，遇到'但''不过''随着'这类转折句不得截断，"
+        "宁可不引，也不能把'分化但有修复预期'引成'分化且弱'。\n"
         "输出严格使用下面五个标记分段，不要写其它标题、不要写前言和后记：\n"
-        "【纳指解读】120-200字。结合均线、RSI、MACD、回撤、波动率中至少两个具体数字，"
-        "说明当前处在什么位置，以及当日涨跌的性质（趋势延续还是震荡）。\n"
+        "【纳指解读】120-200字。开头不要复述收盘点位和涨跌幅——行情卡片已经显示，重复写等于"
+        "给自己制造出错机会；直接从当日涨跌的性质起笔。结合均线、RSI、MACD、回撤、波动率中"
+        "至少两个具体数字，说明当前处在什么位置（趋势延续还是震荡）。\n"
         "【黄金解读】80-150字。结合金价、美元指数、当日涨跌，说明是避险驱动还是利率驱动。\n"
         "【分化判读】80-150字。对照材料里制造业组与服务业组的涨跌和上涨家数，"
         "判断'制造业强、服务业弱'这个判断今天是延续、收敛还是逆转，并指出哪几只最突出。\n"
         "【推演】250-400字，分两层（第一层…第二层…），用郑希的框架解释当前科技行情的位置。"
         "可以自然引用材料里的原话，但必须讲清这是按其方法推演，不是他本人观点。\n"
-        "【观察点】恰好3条，每条一行、不超过40字、以'·'开头，必须是明天或本周能用数据验证的信号，"
-        "例如某个价格、某个环节的涨跌、某个数据发布。禁止写'关注市场变化'这类无法验证的话。"
+        "【观察点】恰好3条，每条一行、不超过40字、以'·'开头，每条必须至少含一个具体数值"
+        "（点位/均线值/百分比/整数价位），只写'能否止跌''是否延续'这种没法验收的不算。"
+        "必须是明天或本周能用数据验证的信号，禁止写'关注市场变化'这类无法验证的话。"
     )
     user_prompt = (
         f"日期：{datetime.date.today().strftime('%Y-%m-%d')}（{'盘前' if mode == 'pre' else '盘后'}）\n\n"
@@ -548,10 +552,11 @@ def compose(mode, materials, feedback=None):
         "temperature": 0.5,
     }
     # MiMo 用的是新标准 max_completion_tokens，硅基流动等仍用 max_tokens
+    # 4096 是实测下限：思考 token 计入这笔预算且常占 60~70%，3000 会让正文没写完就被截断
     if "xiaomimimo" in url:
-        payload["max_completion_tokens"] = 3000
+        payload["max_completion_tokens"] = 4096
     else:
-        payload["max_tokens"] = 3000
+        payload["max_tokens"] = 4096
     data = json.dumps(payload).encode("utf-8")
     d = http_json(url, data=data,
                   headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
@@ -580,6 +585,11 @@ SECTION_LABEL = {"nasdaq": "纳指解读", "gold": "黄金解读", "div": "分�
 # 均线语境下的模糊说法：价格在下方却写"逼近"，会直接误导
 VAGUE_WORDS = ["逼近", "接近"]
 DECLARE_WORDS = ["按其方法", "按他的方法", "按郑希的方法", "推演", "非他本人", "不是他本人"]
+# 段落最低字数与合法结尾标点：用来抓"写到一半被截断"
+MIN_LEN = {"nasdaq": 70, "gold": 48, "div": 48, "view": 150}
+SENT_END = "。！？…」”."
+# 材料里没有资金流数据，出现这类断言就是模型在编
+FUNDFLOW_WORDS = ["承接资金", "资金流入", "资金流出", "资金加仓", "资金撤离", "吸金"]
 
 
 def _nums(text):
@@ -596,6 +606,11 @@ def _nums(text):
             a, b = m.split(".", 1)
             out.add(f"{a}.{b[:1]}")
             out.add(f"{a}.{b[:2]}")
+            # 取整与整十/整百截断也算同一个数（4118.97→4100、101.8217→101）
+            v = float(m)
+            out.add(str(int(v)))
+            out.add(str(int(v) // 100 * 100))
+            out.add(str(int(v) // 10 * 10))
     return out
 
 
@@ -612,12 +627,20 @@ def validate(seg, materials):
         if not (seg.get(key) or "").strip():
             hard.append(f"缺少【{label}】段落或内容为空")
 
+    # 1b) 段落是否写完：字数不达标或段末不是句末标点，都是被截断的信号
+    for key, floor in MIN_LEN.items():
+        t = (seg.get(key) or "").strip()
+        if t and (len(t) < floor or t[-1] not in SENT_END):
+            hard.append(f"【{SECTION_LABEL[key]}】像是写断了（{len(t)} 字，结尾「{t[-8:]}」）")
+
     body = " ".join((seg.get(k) or "") for k in ["nasdaq", "gold", "div", "view"])
 
-    # 2) 均线关系禁用模糊词
+    # 2) 均线语境禁用模糊词（只看均线附近，避免"更接近流动性收缩"这类误伤）
     for w in VAGUE_WORDS:
-        if w in body:
-            hard.append(f"出现「{w}」。价格与均线的关系必须直接写「跌破」或「站上」，不能用模糊说法")
+        pat = (rf"(MA\d{{1,3}}|\d{{1,3}}日均线|\d{{1,3}}日线)[^。；]{{0,12}}{w}"
+               rf"|{w}[^。；]{{0,8}}(MA\d{{1,3}}|日均线|日线)")
+        if re.search(pat, body):
+            hard.append(f"出现「{w}」描述均线。价格与均线的关系必须直接写「跌破」或「站上」")
 
     # 3) 推演必须自证身份
     view = seg.get("view") or ""
@@ -629,6 +652,17 @@ def validate(seg, materials):
     extra = sorted(n for n in _nums(body) if len(n.replace(".", "")) >= 3 and n not in allowed)
     if extra:
         soft.append(f"以下数字材料里没有，可能是模型自己算的：{'、'.join(extra[:8])}")
+
+    # 5) 资金流断言：材料里没有资金流数据，写了就是无依据的编造
+    hit = [w for w in FUNDFLOW_WORDS if w in body]
+    if hit:
+        hard.append(f"出现无数据支撑的资金流判断：「{'」「'.join(hit)}」。"
+                    "材料没有资金流数据，请改写成价格或涨跌幅能证明的事实")
+
+    # 6) 观察点必须带数字，否则无法验收
+    items = [x for x in (seg.get("watch") or "").split("\n") if x.strip()]
+    if items and sum(1 for x in items if re.search(r"\d", x)) < 2:
+        hard.append("【观察点】至少 2 条要带具体数值，现在全是'能否止跌'这种没法验收的说法")
 
     return hard, soft
 
@@ -958,28 +992,40 @@ def main():
     ap.add_argument("--seg", help="从 JSON 读入五段文字并跳过 LLM（无 key 时预览用）")
     args = ap.parse_args()
 
+    # 历史记录：幂等检查与周末判重都要读，统一取一次
+    hist_path = os.path.join(OUT_DIR, "history.jsonl")
+    hist = []
+    if os.path.exists(hist_path):
+        with open(hist_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    hist.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    today = datetime.date.today().isoformat()
+
     # 幂等保护：触发源有 Cloudflare Workers 和 GitHub 原生 cron 两套，可能重复触发。
-    # 同一天同模式只生成一次；history.jsonl 随存档提交回仓库，checkout 后可直接读到。
-    # 调试模式（--no-llm / --seg）不受此限制。
+    # 同一天同模式只生成一次；调试模式（--no-llm / --seg）不受此限制。
     if not args.no_llm and not args.seg:
-        hist_path = os.path.join(OUT_DIR, "history.jsonl")
-        if os.path.exists(hist_path):
-            today = datetime.date.today().isoformat()
-            with open(hist_path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if rec.get("date") == today and rec.get("mode") == args.mode:
-                        print(f"今日 {args.mode} 版已生成过（{today}），跳过本次重复触发")
-                        return
+        if any(r.get("date") == today and r.get("mode") == args.mode for r in hist):
+            print(f"今日 {args.mode} 版已生成过（{today}），跳过本次重复触发")
+            return
 
     print("== 1/5 行情 ==")
     snap = market_snapshot()
+
+    # 周末休市：收盘数据与上一期完全相同时不再出稿，避免同一件事重说一遍。
+    # 只在周六周日生效——工作日 pre 与 post 用的是同一份美股昨收，不能误挡。
+    cur_ixic = (snap.get("ixic") or {}).get("price")
+    last_rec = hist[-1] if hist else None
+    if (not args.no_llm and datetime.date.today().weekday() >= 5 and last_rec
+            and last_rec.get("ixic") and cur_ixic
+            and abs(cur_ixic - last_rec["ixic"]) < 0.005):
+        print(f"休市数据未更新（{cur_ixic} 与上一期相同），周末不重复出稿")
+        return
     tech = tech_indicators(snap.get("ixic_hist") or [])
     print("纳指", snap.get("ixic"), "| 纳指100", snap.get("ndx"))
     print("513100", snap.get("etf_ndx"), "| 518880", snap.get("etf_gold"), "| SOX", snap.get("sox"))
@@ -1091,6 +1137,15 @@ def main():
                 seg, hard, soft, usage = seg2, hard2, soft2, usage2
             print("重试后剩余问题：", hard2 or "无")
         problems = hard + soft
+        # 兜底：五段全空说明输出预算被思考吃光。推一份只有行情卡片的空壳，
+        # 不如推一条说清原因的失败提示，读者至少知道该手动重跑。
+        if not any((seg.get(k) or "").strip() for k in SECTION_LABEL):
+            ct = (usage or {}).get("completion_tokens")
+            note = (f"正文生成失败：模型输出被截断（{ct} tokens 全部用于思考），"
+                    "行情与图表数据已更新，请在 Actions 里手动重跑本期")
+            seg = {"nasdaq": note}
+            problems = list(problems) + [note]
+            print("五段全空，已改为推送失败提示")
         if problems:
             print("本期待核项：")
             for x in problems:
