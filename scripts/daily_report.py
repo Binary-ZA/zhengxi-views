@@ -493,7 +493,12 @@ def fallback_quotes(n=2):
 
 
 # ============ LLM ============
-def compose(mode, materials, feedback=None):
+def compose(mode, materials, part=1, feedback=None, seg1=None):
+    """part=1 出前三段（纳指/黄金/分化），part=2 出后两段（推演/观察点）。
+
+    分两批调用：五段一次写完时思考 token 会吃满输出预算（周检实测 5/14 期被截断），
+    拆开后每批输出量减半，思考与正文的配比更宽裕。
+    """
     token = os.environ.get("LLM_API_KEY", "")
     # 兼容两种填法：填到 /v1 或填完整的 /v1/chat/completions 都能用
     url = (os.environ.get("LLM_BASE_URL") or "https://api.xiaomimimo.com/v1").rstrip("/")
@@ -503,7 +508,7 @@ def compose(mode, materials, feedback=None):
     if not token:
         raise RuntimeError("未配置 LLM_API_KEY secret，无法调用 LLM")
 
-    sys_prompt = (
+    base = (
         "你在写「每日全球科技行情分析报告」，读者是关注科技资产的个人投资者。"
         "风格：先给事实和数据，再给判断；句子短，不堆形容词，不喊口号，"
         "不用'值得注意的是''综上所述''整体来看'这类过渡句。"
@@ -518,32 +523,50 @@ def compose(mode, materials, feedback=None):
         "不要用'逼近''接近'这类模糊说法。\n"
         "7) 引用原话必须保留完整语义，遇到'但''不过''随着'这类转折句不得截断，"
         "宁可不引，也不能把'分化但有修复预期'引成'分化且弱'。\n"
-        "输出严格使用下面五个标记分段，不要写其它标题、不要写前言和后记：\n"
-        "【纳指解读】120-200字。开头不要复述收盘点位和涨跌幅——行情卡片已经显示，重复写等于"
-        "给自己制造出错机会；直接从当日涨跌的性质起笔。结合均线、RSI、MACD、回撤、波动率中"
-        "至少两个具体数字，说明当前处在什么位置（趋势延续还是震荡）。\n"
-        "【黄金解读】80-150字。结合金价、美元指数、当日涨跌，说明是避险驱动还是利率驱动。\n"
-        "【分化判读】80-150字。对照材料里制造业组与服务业组的涨跌和上涨家数，"
-        "判断'制造业强、服务业弱'这个判断今天是延续、收敛还是逆转，并指出哪几只最突出。\n"
-        "【推演】250-400字，分两层（第一层…第二层…），用郑希的框架解释当前科技行情的位置。"
-        "可以自然引用材料里的原话，但必须讲清这是按其方法推演，不是他本人观点。\n"
-        "【观察点】恰好3条，每条一行、不超过40字、以'·'开头，每条必须至少含一个具体数值"
-        "（点位/均线值/百分比/整数价位），只写'能否止跌''是否延续'这种没法验收的不算。"
-        "必须是明天或本周能用数据验证的信号，禁止写'关注市场变化'这类无法验证的话。"
     )
-    user_prompt = (
-        f"日期：{datetime.date.today().strftime('%Y-%m-%d')}（{'盘前' if mode == 'pre' else '盘后'}）\n\n"
-        f"【纳指与ETF行情】\n{materials['market']}\n\n"
-        f"【纳指技术面】\n{materials['tech']}\n\n"
-        f"【制造业属性组】\n{materials['manu']}\n\n"
-        f"【服务业属性组】\n{materials['serv']}\n\n"
-        f"【瓶颈环节】\n{materials['bottleneck']}\n\n"
-        f"【黄金】\n{materials['gold']}\n\n"
-        f"【当日热点（标题/摘要/来源）】\n{materials['hot']}\n\n"
-        f"【郑希原话（可引用，带出处）】\n{materials['quotes']}"
-    )
+    if part == 1:
+        sys_prompt = base + (
+            "输出严格使用下面三个标记分段，不要写其它段落、不要写前言和后记：\n"
+            "【纳指解读】120-200字。开头不要复述收盘点位和涨跌幅——行情卡片已经显示，重复写等于"
+            "给自己制造出错机会；直接从当日涨跌的性质起笔。结合均线、RSI、MACD、回撤、波动率中"
+            "至少两个具体数字，说明当前处在什么位置（趋势延续还是震荡）。\n"
+            "【黄金解读】80-150字。结合金价、美元指数、当日涨跌，说明是避险驱动还是利率驱动。\n"
+            "【分化判读】80-150字。对照材料里制造业组与服务业组的涨跌和上涨家数，"
+            "判断'制造业强、服务业弱'这个判断今天是延续、收敛还是逆转，并指出哪几只最突出。\n"
+        )
+    else:
+        sys_prompt = base + (
+            "输出严格使用下面两个标记分段，不要写其它段落、不要写前言和后记：\n"
+            "【推演】250-400字，分两层（第一层…第二层…），用郑希的框架解释当前科技行情的位置。"
+            "可以自然引用材料里的原话，但必须讲清这是按其方法推演，不是他本人观点。\n"
+            "【观察点】恰好3条，每条一行、不超过40字、以'·'开头，每条必须至少含一个具体数值"
+            "（点位/均线值/百分比/整数价位），只写'能否止跌''是否延续'这种没法验收的不算。"
+            "必须是明天或本周能用数据验证的信号，禁止写'关注市场变化'这类无法验证的话。"
+        )
+    common = (f"【纳指技术面】\n{materials['tech']}\n\n"
+              f"【瓶颈环节】\n{materials['bottleneck']}\n\n"
+              f"【黄金】\n{materials['gold']}\n\n"
+              f"【当日热点（标题/摘要/来源）】\n{materials['hot']}\n\n"
+              f"【郑希原话（可引用，带出处）】\n{materials['quotes']}")
+    head = (f"日期：{datetime.date.today().strftime('%Y-%m-%d')}"
+            f"（{'盘前' if mode == 'pre' else '盘后'}）\n\n")
+    if part == 1:
+        user_prompt = (head
+                       + f"【纳指与ETF行情】\n{materials['market']}\n\n"
+                       + f"【制造业属性组】\n{materials['manu']}\n\n"
+                       + f"【服务业属性组】\n{materials['serv']}\n\n"
+                       + common)
+    else:
+        wrote = "\n".join(f"【{SECTION_LABEL[k]}】{seg1.get(k, '')}"
+                          for k in ("nasdaq", "gold", "div")) if seg1 else "（无）"
+        user_prompt = (head
+                       + f"【纳指与ETF行情】\n{materials['market']}\n\n"
+                       + common
+                       + "\n\n【本期已写好的前三段（仅供衔接，不要重复其中的数字和结论）】\n"
+                       + wrote)
     if feedback:
-        user_prompt += ("\n\n【上一稿被校验拦下的问题，请修正后重写全部五段】\n"
+        scope = "这三段" if part == 1 else "这两段"
+        user_prompt += (f"\n\n【上一稿被校验拦下的问题，请修正后重写{scope}】\n"
                         + "\n".join(f"- {x}" for x in feedback))
     payload = {
         "model": model,
@@ -566,6 +589,18 @@ def compose(mode, materials, feedback=None):
         print(f"  模型 {model}：输入 {u.get('prompt_tokens')} + 输出 {u.get('completion_tokens')} "
               f"= {u.get('total_tokens')} tokens")
     return d["choices"][0]["message"]["content"], u
+
+
+def _merge_usage(a, b):
+    """累加两批调用的 usage（含重试），history 里记的是本期真实总消耗。"""
+    a, b = a or {}, b or {}
+    out = {k: a.get(k, 0) + b.get(k, 0)
+           for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
+    ra = (a.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
+    rb = (b.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
+    if ra or rb:
+        out["completion_tokens_details"] = {"reasoning_tokens": ra + rb}
+    return out
 
 
 def split_sections(text):
@@ -614,21 +649,26 @@ def _nums(text):
     return out
 
 
-def validate(seg, materials):
+def validate(seg, materials, keys=None):
     """返回 (hard, soft)：hard 触发重试，soft 只记录。
 
     这是脚本层的客观检查，不占用 prompt 篇幅——约束写在提示词里靠模型自觉，
     校验写在代码里才靠得住。
+
+    keys 指定本次只检查哪几段（分批组稿时用），默认检查全部五段。
     """
+    check = list(keys or SECTION_LABEL)
     hard, soft = [], []
 
-    # 1) 五段完整性
-    for key, label in SECTION_LABEL.items():
+    # 1) 段落完整性
+    for key in check:
         if not (seg.get(key) or "").strip():
-            hard.append(f"缺少【{label}】段落或内容为空")
+            hard.append(f"缺少【{SECTION_LABEL[key]}】段落或内容为空")
 
     # 1b) 段落是否写完：字数不达标或段末不是句末标点，都是被截断的信号
     for key, floor in MIN_LEN.items():
+        if key not in check:
+            continue
         t = (seg.get(key) or "").strip()
         if t and (len(t) < floor or t[-1] not in SENT_END):
             hard.append(f"【{SECTION_LABEL[key]}】像是写断了（{len(t)} 字，结尾「{t[-8:]}」）")
@@ -947,6 +987,24 @@ def _clip(text, n=260):
     return cut[:idx + 1] if idx >= n // 2 else cut.rstrip() + "…"
 
 
+def push_note(text):
+    """发一条纯文本说明（周末休市跳过等场景）。不调模型、不生成卡片。"""
+    url = os.environ.get("WEBHOOK_URL", "").strip()
+    if not url:
+        print("未配置 WEBHOOK_URL，跳过说明", text)
+        return
+    if "open.feishu.cn" in url:
+        payload = {"msg_type": "text", "content": {"text": text}}
+    elif "oapi.dingtalk.com" in url:
+        payload = {"msgtype": "text", "text": {"content": text}}
+    else:
+        return
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        print("说明推送：", r.read().decode("utf-8", errors="replace")[:120])
+
+
 def push(seg, snap, div, report_url, mode="pre"):
     url = os.environ.get("WEBHOOK_URL", "").strip()
     if not url:
@@ -1025,6 +1083,14 @@ def main():
             and last_rec.get("ixic") and cur_ixic
             and abs(cur_ixic - last_rec["ixic"]) < 0.005):
         print(f"休市数据未更新（{cur_ixic} 与上一期相同），周末不重复出稿")
+        # 静默跳过会让人误判成故障，盘后那次给一句交代（盘前不发，避免周末刷屏）
+        if args.mode == "post":
+            push_note(f"周末休市，纳指仍为 {cur_ixic:,.2f}（与上一期相同），"
+                      "本期不重复推送。下一期：下一交易日 08:00 盘前。")
+        # 落一条跳过记录：半小时后的补触发会被幂等挡住，不会重复推说明
+        with open(hist_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"date": today, "mode": args.mode, "ixic": cur_ixic,
+                                "skip": "weekend-unchanged"}, ensure_ascii=False) + "\n")
         return
     tech = tech_indicators(snap.get("ixic_hist") or [])
     print("纳指", snap.get("ixic"), "| 纳指100", snap.get("ndx"))
@@ -1122,20 +1188,29 @@ def main():
         seg = {"nasdaq": "", "gold": "", "div": "", "watch": "",
                "view": "（--no-llm 调试模式，未调用模型）"}
     else:
-        text, usage = compose(args.mode, materials)
-        seg = split_sections(text)
-        hard, soft = validate(seg, materials)
-        if hard:
-            print("校验未通过，重试一次：")
-            for x in hard:
-                print("  ✗", x)
-            text, usage2 = compose(args.mode, materials, feedback=hard)
-            seg2 = split_sections(text)
-            hard2, soft2 = validate(seg2, materials)
-            # 重试用尽：哪版硬问题少用哪版，实在都不行就用第二版并标注
-            if len(hard2) <= len(hard):
-                seg, hard, soft, usage = seg2, hard2, soft2, usage2
-            print("重试后剩余问题：", hard2 or "无")
+        print("== 5/5 LLM 组稿（分两批）==")
+        seg, usage = {}, {}
+        hard, soft = [], []
+        for part, keys in ((1, ["nasdaq", "gold", "div"]), (2, ["view", "watch"])):
+            text, u = compose(args.mode, materials, part=part, seg1=seg)
+            usage = _merge_usage(usage, u)
+            part_seg = split_sections(text)
+            h, s = validate(part_seg, materials, keys=keys)
+            if h:
+                print(f"第 {part} 批校验未通过，重试：")
+                for x in h:
+                    print("  ✗", x)
+                text2, u2 = compose(args.mode, materials, part=part, feedback=h, seg1=seg)
+                usage = _merge_usage(usage, u2)
+                seg2 = split_sections(text2)
+                h2, s2 = validate(seg2, materials, keys=keys)
+                # 重试用尽：哪版硬问题少用哪版，实在都不行就用第二版并标注
+                if len(h2) <= len(h):
+                    part_seg, h, s = seg2, h2, s2
+                print(f"第 {part} 批重试后剩余问题：", h2 or "无")
+            seg.update({k: part_seg.get(k, "") for k in keys})
+            hard += h
+            soft += s
         problems = hard + soft
         # 兜底：五段全空说明输出预算被思考吃光。推一份只有行情卡片的空壳，
         # 不如推一条说清原因的失败提示，读者至少知道该手动重跑。
