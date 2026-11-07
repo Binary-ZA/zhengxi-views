@@ -493,11 +493,11 @@ def fallback_quotes(n=2):
 
 
 # ============ LLM ============
-def compose(mode, materials, part=1, feedback=None, seg1=None):
-    """part=1 出前三段（纳指/黄金/分化），part=2 出后两段（推演/观察点）。
+def compose(mode, materials, feedback=None):
+    """单批生成五段。
 
-    分两批调用：五段一次写完时思考 token 会吃满输出预算（周检实测 5/14 期被截断），
-    拆开后每批输出量减半，思考与正文的配比更宽裕。
+    MiMo 侧通过 thinking.type=disabled 关闭思维链：思考 token 与正文共享输出预算，
+    曾因此出现多期截断；日报是"按给定材料写判断"，不需要开放式推理。
     """
     token = os.environ.get("LLM_API_KEY", "")
     # 兼容两种填法：填到 /v1 或填完整的 /v1/chat/completions 都能用
@@ -508,7 +508,7 @@ def compose(mode, materials, part=1, feedback=None, seg1=None):
     if not token:
         raise RuntimeError("未配置 LLM_API_KEY secret，无法调用 LLM")
 
-    base = (
+    sys_prompt = (
         "你在写「每日全球科技行情分析报告」，读者是关注科技资产的个人投资者。"
         "风格：先给事实和数据，再给判断；句子短，不堆形容词，不喊口号，"
         "不用'值得注意的是''综上所述''整体来看'这类过渡句。"
@@ -523,50 +523,32 @@ def compose(mode, materials, part=1, feedback=None, seg1=None):
         "不要用'逼近''接近'这类模糊说法。\n"
         "7) 引用原话必须保留完整语义，遇到'但''不过''随着'这类转折句不得截断，"
         "宁可不引，也不能把'分化但有修复预期'引成'分化且弱'。\n"
+        "输出严格使用下面五个标记分段，不要写其它标题、不要写前言和后记：\n"
+        "【纳指解读】120-200字。开头不要复述收盘点位和涨跌幅——行情卡片已经显示，重复写等于"
+        "给自己制造出错机会；直接从当日涨跌的性质起笔。结合均线、RSI、MACD、回撤、波动率中"
+        "至少两个具体数字，说明当前处在什么位置（趋势延续还是震荡）。\n"
+        "【黄金解读】80-150字。结合金价、美元指数、当日涨跌，说明是避险驱动还是利率驱动。\n"
+        "【分化判读】80-150字。对照材料里制造业组与服务业组的涨跌和上涨家数，"
+        "判断'制造业强、服务业弱'这个判断今天是延续、收敛还是逆转，并指出哪几只最突出。\n"
+        "【推演】250-400字，分两层（第一层…第二层…），用郑希的框架解释当前科技行情的位置。"
+        "可以自然引用材料里的原话，但必须讲清这是按其方法推演，不是他本人观点。\n"
+        "【观察点】恰好3条，每条一行、不超过40字、以'·'开头，每条必须至少含一个具体数值"
+        "（点位/均线值/百分比/整数价位），只写'能否止跌''是否延续'这种没法验收的不算。"
+        "必须是明天或本周能用数据验证的信号，禁止写'关注市场变化'这类无法验证的话。"
     )
-    if part == 1:
-        sys_prompt = base + (
-            "输出严格使用下面三个标记分段，不要写其它段落、不要写前言和后记：\n"
-            "【纳指解读】120-200字。开头不要复述收盘点位和涨跌幅——行情卡片已经显示，重复写等于"
-            "给自己制造出错机会；直接从当日涨跌的性质起笔。结合均线、RSI、MACD、回撤、波动率中"
-            "至少两个具体数字，说明当前处在什么位置（趋势延续还是震荡）。\n"
-            "【黄金解读】80-150字。结合金价、美元指数、当日涨跌，说明是避险驱动还是利率驱动。\n"
-            "【分化判读】80-150字。对照材料里制造业组与服务业组的涨跌和上涨家数，"
-            "判断'制造业强、服务业弱'这个判断今天是延续、收敛还是逆转，并指出哪几只最突出。\n"
-        )
-    else:
-        sys_prompt = base + (
-            "输出严格使用下面两个标记分段，不要写其它段落、不要写前言和后记：\n"
-            "【推演】250-400字，分两层（第一层…第二层…），用郑希的框架解释当前科技行情的位置。"
-            "可以自然引用材料里的原话，但必须讲清这是按其方法推演，不是他本人观点。\n"
-            "【观察点】恰好3条，每条一行、不超过40字、以'·'开头，每条必须至少含一个具体数值"
-            "（点位/均线值/百分比/整数价位），只写'能否止跌''是否延续'这种没法验收的不算。"
-            "必须是明天或本周能用数据验证的信号，禁止写'关注市场变化'这类无法验证的话。"
-        )
-    common = (f"【纳指技术面】\n{materials['tech']}\n\n"
-              f"【瓶颈环节】\n{materials['bottleneck']}\n\n"
-              f"【黄金】\n{materials['gold']}\n\n"
-              f"【当日热点（标题/摘要/来源）】\n{materials['hot']}\n\n"
-              f"【郑希原话（可引用，带出处）】\n{materials['quotes']}")
-    head = (f"日期：{datetime.date.today().strftime('%Y-%m-%d')}"
-            f"（{'盘前' if mode == 'pre' else '盘后'}）\n\n")
-    if part == 1:
-        user_prompt = (head
-                       + f"【纳指与ETF行情】\n{materials['market']}\n\n"
-                       + f"【制造业属性组】\n{materials['manu']}\n\n"
-                       + f"【服务业属性组】\n{materials['serv']}\n\n"
-                       + common)
-    else:
-        wrote = "\n".join(f"【{SECTION_LABEL[k]}】{seg1.get(k, '')}"
-                          for k in ("nasdaq", "gold", "div")) if seg1 else "（无）"
-        user_prompt = (head
-                       + f"【纳指与ETF行情】\n{materials['market']}\n\n"
-                       + common
-                       + "\n\n【本期已写好的前三段（仅供衔接，不要重复其中的数字和结论）】\n"
-                       + wrote)
+    user_prompt = (
+        f"日期：{datetime.date.today().strftime('%Y-%m-%d')}（{'盘前' if mode == 'pre' else '盘后'}）\n\n"
+        f"【纳指与ETF行情】\n{materials['market']}\n\n"
+        f"【纳指技术面】\n{materials['tech']}\n\n"
+        f"【制造业属性组】\n{materials['manu']}\n\n"
+        f"【服务业属性组】\n{materials['serv']}\n\n"
+        f"【瓶颈环节】\n{materials['bottleneck']}\n\n"
+        f"【黄金】\n{materials['gold']}\n\n"
+        f"【当日热点（标题/摘要/来源）】\n{materials['hot']}\n\n"
+        f"【郑希原话（可引用，带出处）】\n{materials['quotes']}"
+    )
     if feedback:
-        scope = "这三段" if part == 1 else "这两段"
-        user_prompt += (f"\n\n【上一稿被校验拦下的问题，请修正后重写{scope}】\n"
+        user_prompt += ("\n\n【上一稿被校验拦下的问题，请修正后重写全部五段】\n"
                         + "\n".join(f"- {x}" for x in feedback))
     payload = {
         "model": model,
@@ -575,15 +557,26 @@ def compose(mode, materials, part=1, feedback=None, seg1=None):
         "temperature": 0.5,
     }
     # MiMo 用的是新标准 max_completion_tokens，硅基流动等仍用 max_tokens
-    # 4096 是实测下限：思考 token 计入这笔预算且常占 60~70%，3000 会让正文没写完就被截断
     if "xiaomimimo" in url:
         payload["max_completion_tokens"] = 4096
+        # 关闭思维链：思考与正文共享这笔预算，曾把正文挤到截断。
+        # 关掉后 4096 全给正文，且 temperature=0.5 才真正生效（思考模式下被强制 1.0）。
+        payload["thinking"] = {"type": "disabled"}
     else:
         payload["max_tokens"] = 4096
-    data = json.dumps(payload).encode("utf-8")
-    d = http_json(url, data=data,
-                  headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                  timeout=180)
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    try:
+        d = http_json(url, data=json.dumps(payload).encode("utf-8"),
+                      headers=headers, timeout=180)
+    except Exception as e:
+        # 账号或模型版本不认 thinking 参数时，去掉重试，不让整期因此失败
+        if payload.get("thinking") and "thinking" in str(e).lower():
+            print("  thinking 参数不被接受，已移除并重试：", str(e)[:120])
+            payload.pop("thinking", None)
+            d = http_json(url, data=json.dumps(payload).encode("utf-8"),
+                          headers=headers, timeout=180)
+        else:
+            raise
     u = d.get("usage") or {}
     if u:
         print(f"  模型 {model}：输入 {u.get('prompt_tokens')} + 输出 {u.get('completion_tokens')} "
@@ -1188,29 +1181,22 @@ def main():
         seg = {"nasdaq": "", "gold": "", "div": "", "watch": "",
                "view": "（--no-llm 调试模式，未调用模型）"}
     else:
-        print("== 5/5 LLM 组稿（分两批）==")
-        seg, usage = {}, {}
-        hard, soft = [], []
-        for part, keys in ((1, ["nasdaq", "gold", "div"]), (2, ["view", "watch"])):
-            text, u = compose(args.mode, materials, part=part, seg1=seg)
-            usage = _merge_usage(usage, u)
-            part_seg = split_sections(text)
-            h, s = validate(part_seg, materials, keys=keys)
-            if h:
-                print(f"第 {part} 批校验未通过，重试：")
-                for x in h:
-                    print("  ✗", x)
-                text2, u2 = compose(args.mode, materials, part=part, feedback=h, seg1=seg)
-                usage = _merge_usage(usage, u2)
-                seg2 = split_sections(text2)
-                h2, s2 = validate(seg2, materials, keys=keys)
-                # 重试用尽：哪版硬问题少用哪版，实在都不行就用第二版并标注
-                if len(h2) <= len(h):
-                    part_seg, h, s = seg2, h2, s2
-                print(f"第 {part} 批重试后剩余问题：", h2 or "无")
-            seg.update({k: part_seg.get(k, "") for k in keys})
-            hard += h
-            soft += s
+        print("== 5/5 LLM 组稿 ==")
+        text, usage = compose(args.mode, materials)
+        seg = split_sections(text)
+        hard, soft = validate(seg, materials)
+        if hard:
+            print("校验未通过，重试一次：")
+            for x in hard:
+                print("  ✗", x)
+            text2, usage2 = compose(args.mode, materials, feedback=hard)
+            usage = _merge_usage(usage, usage2)
+            seg2 = split_sections(text2)
+            hard2, soft2 = validate(seg2, materials)
+            # 重试用尽：哪版硬问题少用哪版，实在都不行就用第二版并标注
+            if len(hard2) <= len(hard):
+                seg, hard, soft = seg2, hard2, soft2
+            print("重试后剩余问题：", hard2 or "无")
         problems = hard + soft
         # 兜底：五段全空说明输出预算被思考吃光。推一份只有行情卡片的空壳，
         # 不如推一条说清原因的失败提示，读者至少知道该手动重跑。
